@@ -1,0 +1,98 @@
+// =====================================================================
+// HW6 export queries: paste results into reports/powerbi_values.csv
+// Run each query in DAX query view, copy the result grid (Copy -> with headers for the
+// first one, values only for the rest) and paste under one header: measure, slice, value.
+// CONVERT ( ..., DOUBLE ) strips the measure format strings so values come out unrounded.
+// Alpha Signal is text, so it has its own queries (5 and 6).
+// =====================================================================
+
+// ---- Query 1: every numeric measure at the grand total ----
+EVALUATE
+UNION (
+    ROW ( "measure", "AUM (naive SUM)", "slice", "Grand Total", "value", CONVERT ( [AUM (naive SUM)], DOUBLE ) ),
+    ROW ( "measure", "Total Fees", "slice", "Grand Total", "value", CONVERT ( [Total Fees], DOUBLE ) ),
+    ROW ( "measure", "Net Flows", "slice", "Grand Total", "value", CONVERT ( [Net Flows], DOUBLE ) ),
+    ROW ( "measure", "Ending AUM", "slice", "Grand Total", "value", CONVERT ( [Ending AUM], DOUBLE ) ),
+    ROW ( "measure", "Ending Clients", "slice", "Grand Total", "value", CONVERT ( [Ending Clients], DOUBLE ) ),
+    ROW ( "measure", "Avg AUM per Client", "slice", "Grand Total", "value", CONVERT ( [Avg AUM per Client], DOUBLE ) ),
+    ROW ( "measure", "Ending AUM LY", "slice", "Grand Total", "value", CONVERT ( [Ending AUM LY], DOUBLE ) ),
+    ROW ( "measure", "AUM YoY %", "slice", "Grand Total", "value", CONVERT ( [AUM YoY %], DOUBLE ) ),
+    ROW ( "measure", "Ending AUM PM", "slice", "Grand Total", "value", CONVERT ( [Ending AUM PM], DOUBLE ) ),
+    ROW ( "measure", "AUM MoM %", "slice", "Grand Total", "value", CONVERT ( [AUM MoM %], DOUBLE ) ),
+    ROW ( "measure", "Avg Monthly AUM", "slice", "Grand Total", "value", CONVERT ( [Avg Monthly AUM], DOUBLE ) ),
+    ROW ( "measure", "Fee Yield (bps)", "slice", "Grand Total", "value", CONVERT ( [Fee Yield (bps)], DOUBLE ) ),
+    ROW ( "measure", "Organic Growth Rate", "slice", "Grand Total", "value", CONVERT ( [Organic Growth Rate], DOUBLE ) ),
+    ROW ( "measure", "AUM-Weighted Alpha", "slice", "Grand Total", "value", CONVERT ( [AUM-Weighted Alpha], DOUBLE ) ),
+    ROW ( "measure", "Top 10 Client Share", "slice", "Grand Total", "value", CONVERT ( [Top 10 Client Share], DOUBLE ) )
+)
+
+// ---- Query 2: by dim_date[year] ----
+EVALUATE
+VAR Years = VALUES ( dim_date[year] )
+RETURN
+    UNION (
+        SELECTCOLUMNS ( Years, "measure", "Ending AUM", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [Ending AUM] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "Ending AUM LY", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [Ending AUM LY] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "AUM YoY %", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [AUM YoY %] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "Avg Monthly AUM", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [Avg Monthly AUM] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "Fee Yield (bps)", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [Fee Yield (bps)] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "Organic Growth Rate", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [Organic Growth Rate] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "AUM-Weighted Alpha", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [AUM-Weighted Alpha] ), DOUBLE ) ),
+        SELECTCOLUMNS ( Years, "measure", "AUM (naive SUM)", "slice", "Year " & dim_date[year], "value", CONVERT ( CALCULATE ( [AUM (naive SUM)] ), DOUBLE ) )
+    )
+
+// ---- Query 3: by dim_client[client_tier], 2024 only ----
+EVALUATE
+CALCULATETABLE (
+    VAR Tiers = FILTER ( VALUES ( dim_client[client_tier] ), NOT ISBLANK ( dim_client[client_tier] ) )
+    RETURN
+    UNION (
+    SELECTCOLUMNS ( Tiers, "measure", "Ending AUM", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Ending AUM] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "Avg AUM per Client", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Avg AUM per Client] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "Ending AUM LY", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Ending AUM LY] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "AUM YoY %", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [AUM YoY %] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "Fee Yield (bps)", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Fee Yield (bps)] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "Organic Growth Rate", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Organic Growth Rate] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "AUM-Weighted Alpha", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [AUM-Weighted Alpha] ), DOUBLE ) ),
+    SELECTCOLUMNS ( Tiers, "measure", "Top 10 Client Share", "slice", "2024 Tier " & dim_client[client_tier], "value", CONVERT ( CALCULATE ( [Top 10 Client Share] ), DOUBLE ) )
+    ),
+    dim_date[year] = 2024
+)
+
+// ---- Query 4: December 2024 (measure 5) ----
+EVALUATE
+CALCULATETABLE (
+    UNION (
+        ROW ( "measure", "Ending AUM", "slice", "Dec 2024", "value", CONVERT ( [Ending AUM], DOUBLE ) ),
+        ROW ( "measure", "Ending AUM PM", "slice", "Dec 2024", "value", CONVERT ( [Ending AUM PM], DOUBLE ) ),
+        ROW ( "measure", "AUM MoM %", "slice", "Dec 2024", "value", CONVERT ( [AUM MoM %], DOUBLE ) )
+    ),
+    dim_date[year] = 2024,
+    dim_date[month] = 12
+)
+
+// ---- Query 5: Alpha Signal (text), grand total and by year ----
+EVALUATE
+VAR Years = VALUES ( dim_date[year] )
+RETURN
+    UNION (
+        ROW ( "measure", "Alpha Signal", "slice", "Grand Total", "value", [Alpha Signal] ),
+        SELECTCOLUMNS ( Years, "measure", "Alpha Signal", "slice", "Year " & dim_date[year], "value", CALCULATE ( [Alpha Signal] ) )
+    )
+
+// ---- Query 6: Alpha Signal (text), by tier for 2024 ----
+EVALUATE
+CALCULATETABLE (
+    SELECTCOLUMNS (
+        FILTER ( VALUES ( dim_client[client_tier] ), NOT ISBLANK ( dim_client[client_tier] ) ),
+        "measure", "Alpha Signal", "slice", "2024 Tier " & dim_client[client_tier], "value", CALCULATE ( [Alpha Signal] )
+    ),
+    dim_date[year] = 2024
+)
+
+// ---- Query 7 (Part C a): Ending AUM vs SUMX over clients, no filters ----
+EVALUATE
+ROW (
+    "Ending AUM", CONVERT ( [Ending AUM], DOUBLE ),
+    "SUMX over clients", CONVERT ( SUMX ( VALUES ( dim_client[client_id] ), [Ending AUM] ), DOUBLE )
+)
