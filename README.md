@@ -52,11 +52,16 @@ To regenerate `reports/powerbi_values.csv`: open `powerbi/hw06.pbix`, run querie
 
 ## Claude Code review of `01_reconcile_measures.py`
 
-> **TO DO:** run the review in Claude Code (e.g. "Review scripts/01_reconcile_measures.py for correctness and independence from Power BI"), then replace this note with what it flagged and what you did about each point. One line per finding is enough.
+I asked Claude Code to review the script before committing. None of its findings changed a current result, but they would cause false mismatches, crashes or hidden errors on different input. After the fixes, I re-ran the script: the pandas values are identical and all 91 rows still match.
 
-| Claude Code flagged | What I did |
-|---|---|
-| | |
+| # | Claude Code flagged | Why it matters | What I did |
+|---|---|---|---|
+| 1 | **Empty slices give 0 in pandas but BLANK in DAX.** `SUM` over no rows is BLANK in DAX, and BLANK − BLANK is still BLANK, but pandas `.sum()` returns 0. This affects `total_fees`, `net_flows` and `aum_naive` (L126–136), and `fee_yield_bps` returns 0 where DAX returns blank. | Any slice with no fees or no transactions would show up as a false mismatch. No current slice is empty. | **Fixed.** Added `sum_or_blank()`, used by `aum_naive`, `total_fees`, `net_flows`, `avg_monthly_aum` and `fee_yield_bps`. `net_flows` returns blank only when deposits and withdrawals are both blank, as in DAX. Tested: an empty 2019 window now returns blank for all five. |
+| 2 | **`to_number` crashes on formatted values.** It strips `$` and `,` but not `%`, and doesn't handle accounting negatives like `($1,234.00)` (L282–288). | A re-export containing `19.58%` would raise a `ValueError` and stop the whole run, instead of reporting a mismatch. | **Fixed.** `to_number` now handles `%` (÷ 100), `($1,234.00)`, `$`, commas and the Unicode minus sign. Anything else is caught, and that row is reported as `match = False` instead of stopping the run. Tested with `19.58%`, `($1,234.00)` and `abc`. |
+| 3 | **Duplicate Power BI rows aren't caught.** If a measure/slice pair is pasted twice, the outer merge (L295) creates two rows, and both can match. | The "91 match" count could be inflated without any warning. | **Fixed.** The script now exits with an error listing any duplicate measure/slice rows. Tested by pasting one row twice. |
+| 4 | **`is_return_suspect != 1` isn't exactly the DAX `= 0`** (L188). A NaN flag passes the pandas filter but fails the DAX one. | No effect today, because the column has no NaNs, but `== 0` mirrors the DAX exactly at no cost. | **Fixed.** Changed to `is_return_suspect == 0`. |
+| 5 | **The Fee Yield tolerance is very tight.** It's compared at `RATIO_TOL = 0.0001` on a value of about 43 bps, a relative precision of about 2e-6. | It passes because Power BI exports full precision, but a value rounded to the displayed format (`43.15`) would fail. | **Kept on purpose.** The assignment sets 0.0001 for ratios, and my values come from DAX query view at full precision, so the strict tolerance proves an exact match rather than a rounded one. |
+| 6 | **Importing the script loads every CSV.** `load()` runs at import time (L75), and `Ctx`'s defaults depend on it; `02_part_c_evidence.py` relies on this side effect. | Fine for a homework pipeline, but a hidden cost if the code is reused. | **Left as is.** Loading once at import keeps both scripts on the same data and logic; it is documented here for anyone reusing the code. |
 
 ## Mismatches and fixes
 

@@ -113,6 +113,11 @@ def last_snapshot(s: pd.DataFrame) -> pd.DataFrame:
     return s[s["snapshot_date"] == s["snapshot_date"].max()]
 
 
+def sum_or_blank(series: pd.Series) -> float:
+    """DAX SUM over no rows is BLANK, not 0. Return NaN (our BLANK) for empty input."""
+    return series.sum() if len(series) else np.nan
+
+
 def divide(n, d):
     """DAX DIVIDE without an alternate result: blank (NaN) when the denominator is blank or 0."""
     if d is None or pd.isna(d) or d == 0 or n is None or pd.isna(n):
@@ -124,16 +129,20 @@ def divide(n, d):
 # Measures (pandas twins of the DAX in powerbi/measures.md)
 # --------------------------------------------------------------------------------------
 def aum_naive(ctx):
-    return rows(SNAP, "snapshot_date", ctx)["aum"].sum()
+    return sum_or_blank(rows(SNAP, "snapshot_date", ctx)["aum"])
 
 
 def total_fees(ctx):
-    return rows(FEES, "fee_date", ctx)["amount"].sum()
+    return sum_or_blank(rows(FEES, "fee_date", ctx)["amount"])
 
 
 def net_flows(ctx):
     t = rows(TXN, "txn_date", ctx)
-    return t.loc[t.txn_type == "Deposit", "amount"].sum() - t.loc[t.txn_type == "Withdrawal", "amount"].sum()
+    dep = sum_or_blank(t.loc[t.txn_type == "Deposit", "amount"])
+    wd = sum_or_blank(t.loc[t.txn_type == "Withdrawal", "amount"])
+    if pd.isna(dep) and pd.isna(wd):
+        return np.nan  # BLANK - BLANK = BLANK
+    return (0 if pd.isna(dep) else dep) - (0 if pd.isna(wd) else wd)  # BLANK acts as 0 in arithmetic
 
 
 def ending_aum(ctx):
@@ -170,12 +179,12 @@ def aum_mom(ctx):
 
 def avg_monthly_aum(ctx):
     s = rows(SNAP, "snapshot_date", ctx)
-    return divide(s["aum"].sum(), s["snapshot_date"].nunique())
+    return divide(sum_or_blank(s["aum"]), s["snapshot_date"].nunique())
 
 
 def fee_yield_bps(ctx):
     s = rows(SNAP, "snapshot_date", ctx)
-    return divide(total_fees(ctx) * 12 * 10000, s["aum"].sum())
+    return divide(total_fees(ctx) * 12 * 10000, sum_or_blank(s["aum"]))
 
 
 def organic_growth(ctx):
@@ -185,7 +194,7 @@ def organic_growth(ctx):
 def weighted_alpha(ctx, include_suspect=False):
     s = last_snapshot(rows(SNAP, "snapshot_date", ctx))  # last date is found BEFORE excluding suspects
     if not include_suspect:
-        s = s[s["is_return_suspect"] != 1]
+        s = s[s["is_return_suspect"] == 0]  # same test as DAX [is_return_suspect] = 0
     if s.empty:
         return np.nan
     return divide((s["aum"] * s["active_alpha_ytd"]).sum(), s["aum"].sum())
@@ -280,12 +289,23 @@ def pandas_values() -> pd.DataFrame:
 # Compare
 # --------------------------------------------------------------------------------------
 def to_number(v):
+    """Parse a Power BI value. Handles $, thousands commas, %, and accounting negatives like ($1,234.00).
+    Raises ValueError for anything else; compare() reports that row as a mismatch instead of crashing."""
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return np.nan
-    s = str(v).strip().replace(",", "").replace("$", "")
+    s = str(v).strip().replace(",", "").replace("$", "").replace("\u2212", "-")
     if s == "":
         return np.nan
-    return float(s)
+    negative = s.startswith("(") and s.endswith(")")
+    if negative:
+        s = s[1:-1].strip()
+    pct = s.endswith("%")
+    if pct:
+        s = s[:-1].strip()
+    x = float(s)
+    if pct:
+        x /= 100
+    return -x if negative else x
 
 
 def compare(pbi: pd.DataFrame, pdv: pd.DataFrame) -> pd.DataFrame:
@@ -307,7 +327,11 @@ def compare(pbi: pd.DataFrame, pdv: pd.DataFrame) -> pd.DataFrame:
             b = "" if pd.isna(qv) else str(qv).strip()
             recs.append((r.measure, r.slice, a, b, np.nan, a == b))
             continue
-        a, b = to_number(pv), to_number(qv)
+        try:
+            a, b = to_number(pv), to_number(qv)
+        except ValueError:  # unparseable Power BI value: flag it, keep going
+            recs.append((r.measure, r.slice, pv, qv, np.nan, False))
+            continue
         if np.isnan(a) and np.isnan(b):  # both blank, e.g. YoY in 2020
             recs.append((r.measure, r.slice, a, b, 0.0, True))
             continue
@@ -330,13 +354,17 @@ def main():
                  "(powerbi/export_queries.dax), then run this script again.")
     # sep=None sniffs commas or tabs (a grid pasted from DAX query view is tab-separated);
     # headers like "[measure]" are normalised to "measure".
-    pbi = pd.read_csv(pbi_path, sep=None, engine="python", dtype=str, keep_default_na=False)
-    pbi.columns = [c.strip().strip("[]").lower() for c in pbi.columns]
+    pbi = pd.read_csv(pbi_path, sep=None, engine="python", dtype=str, keep_default_na=False, encoding="utf-8-sig")
+    pbi.columns = [c.strip().strip("\ufeff").strip("[]").lower() for c in pbi.columns]
     missing = {"measure", "slice", "value"} - set(pbi.columns)
     if missing:
         sys.exit(f"reports/powerbi_values.csv is missing columns: {sorted(missing)}")
-    pbi = pbi[pbi["measure"].str.strip().str.lower() != "measure"]  # drop header rows pasted twice
+    pbi = pbi[pbi["measure"].str.strip().str.strip("[]").str.lower() != "measure"]  # drop header rows pasted again
     pbi = pbi[["measure", "slice", "value"]]
+    pbi["measure"], pbi["slice"] = pbi["measure"].str.strip(), pbi["slice"].str.strip()
+    dupes = pbi[pbi.duplicated(["measure", "slice"], keep=False)]
+    if not dupes.empty:  # a pasted-twice row would otherwise be counted as two matches
+        sys.exit("reports/powerbi_values.csv has duplicate measure/slice rows:\n" + dupes.to_string(index=False))
     rec = compare(pbi, pdv)
     rec.to_csv(REPORTS / "measure_reconciliation.csv", index=False)
 
