@@ -145,4 +145,67 @@ Format: `0.00%`. Pattern: **Last balance**, ranked, then **Recompute** as a shar
 
 ## Part C — Design questions
 
-*(to be added)*
+Every number below is reproduced by `python scripts/02_part_c_evidence.py`, which reuses the pandas measure logic that matched Power BI on all 91 rows of `reports/measure_reconciliation.csv`.
+
+### (a) Ending AUM vs `SUMX ( VALUES ( dim_client[client_id] ), [Ending AUM] )`
+
+| | Value |
+|---|---:|
+| `Ending AUM` (no filters) | **$12,729,572,078.86** |
+| `SUMX` over clients | **$13,149,297,713.80** |
+| Difference | **$419,725,634.94** |
+
+`Ending AUM` finds **one** last date for the whole filter (2024-12-01) and sums the 2,325 clients present on it. The SUMX version iterates every client, and context transition makes `[Ending AUM]` find **each client's own** last date. For the 175 clients who left the firm (last snapshot in 2022 for 13 of them, in 2023 for 162), that is their final balance before departure. Those stale balances add up to exactly **$419,725,634.94**, the whole gap. Money that has already walked out the door is counted as if it were still here.
+
+Power BI agrees: query 7 in `powerbi/export_queries.dax` returns both values side by side.
+
+**`Ending AUM` answers "How much do we manage today?"** The SUMX number is "the last-known balance of everyone who has ever been a client," which is not a balance at any single point in time.
+
+### (b) Why 2024 Fee Yield (43.15 bps) < ICE 9 Effective Fee Rate (45.53 bps)
+
+Both use the same numerator, 2024 fees of **$48,714,005.93**. The denominators differ:
+
+| 2024 | Denominator | bps |
+|---|---:|---:|
+| Effective Fee Rate = fees × 12 × 10,000 ÷ Σ `fact_fees[aum_basis]` | $128,385,303,527.10 | 45.53 |
+| Fee Yield = fees × 12 × 10,000 ÷ Σ `fact_portfolio_snapshot[aum]` | $135,459,843,783.73 | 43.15 |
+
+Pandas evidence (joining the two facts on `client_id` + month):
+- `fact_fees` has exactly **one row per billed client-month** (26,216 rows in 2024), and where a fee row exists, `aum_basis` equals the snapshot `aum` **to the cent** (max difference 0.00).
+- But the snapshot has **27,900** client-months in 2024. **1,684 (6.0%) have no fee row**, holding **$7,074,540,256.63** of AUM. That is exactly the denominator gap (135.46B − 128.39B).
+- The gaps are scattered, not structural: 5–6% of client-months in every year 2020–2024, every tier (Retail 6.3%, HNW 5.7%, UHNW 5.4%), and 1,082 different clients each missing 1–5 months. There are no fee rows without a snapshot.
+
+**Data limitation:** `fact_fees` is **incomplete**. It does not record a fee for every client-month that holds assets, and nothing in the data says whether those months were waived, unbilled, or simply missing from the billing extract. Effective Fee Rate only measures the price on *billed* assets. Fee Yield measures revenue on *all* assets, so it is lower by the share of AUM that generated no recorded fee. The 2.4 bps difference on 2024's $11.29B average book is about **$2.7M** of revenue, either never billed or not captured in the data.
+
+### (c) AUM-Weighted Alpha: last snapshot only, and excluding suspects
+
+**Why the last snapshot only:** `active_alpha_ytd` is **year-to-date**. January's value covers one month and December's covers twelve, so mixing months blends returns over different horizons. On top of that, `aum` is a balance, so weighting across 12 months would count each client's dollars 12 times. The 2024 weighted alpha builds from −0.01% in January to +1.45% in December. Only the last snapshot gives the full-period answer, weighted by the balance on the same date.
+
+**Why exclude `is_return_suspect = 1`:** at 2024-12-01, 148 of 2,325 rows are flagged. Their `active_alpha_ytd` runs from −121% to **+7,134%** (mean +231.6%), which are data errors, not real performance. The 2,177 clean rows range from −50% to +50%.
+
+| Grand total (last snapshot, 2024-12-01) | Value |
+|---|---:|
+| AUM-weighted, suspects **excluded** (the measure) | **1.45%** |
+| Simple mean, same 2,177 rows | **0.88%** |
+| AUM-weighted, suspects **included** | **1.67%** |
+| *(for reference) simple mean, suspects included* | *15.56%* |
+
+The simple mean is lower because it gives the smallest account the same vote as the $82M largest one, and the smallest accounts did worst. The bottom fifth of accounts by size averaged −4.4% alpha, while the other four fifths averaged +1.3% to +3.3%. In Retail the gap is widest: a simple mean of 0.53% against an AUM-weighted 2.40%. AUM weighting answers the question that matters for the firm: how did the *dollars* we manage do? Suspect rows hold only $15.5M of AUM, so weighting already dampens them (+0.22 pts). In a simple mean they would blow the result up roughly 18×. Excluding them protects both versions.
+
+### (d) Organic Growth Rate by tier, 2024
+
+| 2024 tier | Net Flows | Ending AUM LY | **Organic Growth** | **AUM YoY %** | Growth not from flows |
+|---|---:|---:|---:|---:|---:|
+| Retail | $44.2M | $447.8M | **9.87%** | 19.13% | $41.5M |
+| HNW | $25.2M | $2,130.2M | **1.18%** | 19.64% | $393.1M |
+| UHNW | $8.1M | $8,067.0M | **0.10%** | 19.59% | $1,572.5M |
+| Firm | $77.5M | $10,645.0M | **0.73%** | 19.58% | $2,007.1M |
+
+**What it says:** every tier grew about 19–20%, but almost none of it was new money. Firm-wide, net flows explain 0.73 points of the 19.58-point growth; the rest, about $2.0B, came from somewhere other than deposits and withdrawals, mostly market returns. Retail is the only tier where clients are meaningfully adding money (9.9% of its base), and it supplied 57% of the firm's net new dollars while holding 4% of its AUM. UHNW, which is 76% of AUM, grew $1.58B almost entirely from markets. Wildcat's book is growing *with the market*, not by winning wallet share at the top end.
+
+**What it does not tell you:**
+- It does not *prove* the remainder is investment performance. AUM YoY − Organic is a residual that also includes dividends, fees debited, and the balances of clients who left.
+- Which flows came from new clients versus existing ones, or how many clients were added or lost.
+- Whether the growth is profitable. Retail flows look strong, but Retail AUM is small, and on its own the rate says nothing about revenue. (Fee yield differs by tier: Retail 82.8 bps, UHNW 36.1 bps.)
+- Size: a rate on a small base looks large. Retail's 9.87% is $44M, while UHNW's 0.10% is $8M on an $8B base.
+- Tier is the client's *current* tier in `dim_client` (a static attribute), so clients who moved tiers during the year are not tracked.
