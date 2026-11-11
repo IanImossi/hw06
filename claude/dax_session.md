@@ -234,7 +234,145 @@ RETURN
 ## Response 1
 
 ```text
-PASTE CLAUDE DESKTOP'S FULL RESPONSE HERE
+Below are the measure, its filter context in each of your three visuals, a test query and my assumptions.
+
+One thing to know first: your metadata already has an `AUM-Weighted Alpha` measure in `_Measure`, and its logic is basically correct. The version below keeps that logic and makes three small changes:
+- It uses `MAX` to find the last date instead of `LASTNONBLANK`. It picks the same date and is cheaper.
+- It points the date filter at `dim_date`.
+- It wraps the suspect filter in `KEEPFILTERS`.
+
+## 1. Measure
+
+```dax
+AUM-Weighted Alpha =
+VAR LastSnapshot =
+    MAX ( fact_portfolio_snapshot[snapshot_date] )    -- last 1st-of-month with rows in the current filter
+RETURN
+    CALCULATE (
+        DIVIDE (
+            SUMX (
+                fact_portfolio_snapshot,
+                fact_portfolio_snapshot[aum] * fact_portfolio_snapshot[active_alpha_ytd]
+            ),
+            SUM ( fact_portfolio_snapshot[aum] )
+        ),
+        TREATAS ( { LastSnapshot }, dim_date[Date] ),
+        KEEPFILTERS ( fact_portfolio_snapshot[is_return_suspect] = 0 )
+    )
+```
+
+- **Home table:** `_Measure`. When you rename that table to `_Measures`, the measure moves with it.
+- **Format string:** `0.00%`.
+- **Why it's safe for these columns:**
+  - It never adds `aum` or `active_alpha_ytd` across dates: only one snapshot date is ever in scope.
+  - It never uses `LASTDATE`, `ENDOFMONTH` or `CLOSINGBALANCE*`, so it can't land on a month-end date that has no rows.
+- **BLANK when nothing qualifies:** if there are no rows, `LastSnapshot` is blank, `TREATAS` matches nothing and `DIVIDE` returns BLANK. The same happens if every row on that date is suspect.
+
+## 2. Filter context
+
+**How the last snapshot is found.** `MAX(snapshot_date)` runs in the visual's full filter context, so you get the latest date that actually has fact rows for that cell. That's the same date `LASTNONBLANK(…COUNTROWS…)` gives, so it matches `[Ending AUM]` everywhere. `TREATAS` then pins `dim_date[Date]` to that one day. It only replaces filters on that column, so filters like Year stay in place, and they don't conflict because the date already sits inside them.
+
+| Visual | Filter context | Last snapshot used |
+|---|---|---|
+| Card | none | 2024-12-01, all non-suspect rows on that date |
+| Table by `dim_date[Year]` | Year = Y | Y-12-01, or the latest month with data if the year is partial. Each year shows its full-year YTD alpha. |
+| Table by `dim_client[client_tier]`, 2024 | Year = 2024 and tier = T | The latest 2024 date with rows for tier T. Normally Dec 1; earlier only if no client in that tier has a December row. |
+
+**Order of the suspect and date filters.** Inside `CALCULATE`, the two filter arguments don't apply one after the other. Both are built from the outer context and then intersected. The order that matters is that `LastSnapshot` is calculated before the suspect filter exists. So:
+1. The date is chosen from all rows, suspect ones included.
+2. Then the suspect rows on that date are dropped.
+
+A client whose December row is suspect is left out. Their November row isn't used in its place, because a November YTD number isn't a full-year value. If every row on the last date is suspect, the result is BLANK rather than an older month's number. `KEEPFILTERS` means a slicer set to `is_return_suspect = 1` also gives BLANK, instead of being silently overridden.
+
+**Grand total.**
+- **By year:** the total row has no year filter, so it shows the 2024-12-01 value, which equals the card. It is not a sum or average of the yearly rows. That's correct, because YTD rates can't be added up.
+- **By tier, 2024:** the tier filter is removed and 2024 stays, so the total is the AUM-weighted alpha across all tiers on 2024-12-01. When every tier row uses Dec 1, it equals the AUM-weighted blend of the rows.
+
+## 3. Test query (DAX query view)
+
+```dax
+DEFINE
+    MEASURE '_Measure'[AUM-Weighted Alpha] =
+        VAR LastSnapshot = MAX ( fact_portfolio_snapshot[snapshot_date] )
+        RETURN
+            CALCULATE (
+                DIVIDE (
+                    SUMX ( fact_portfolio_snapshot,
+                        fact_portfolio_snapshot[aum] * fact_portfolio_snapshot[active_alpha_ytd] ),
+                    SUM ( fact_portfolio_snapshot[aum] )
+                ),
+                TREATAS ( { LastSnapshot }, dim_date[Date] ),
+                KEEPFILTERS ( fact_portfolio_snapshot[is_return_suspect] = 0 )
+            )
+    MEASURE '_Measure'[_t Last Snapshot] =
+        MAX ( fact_portfolio_snapshot[snapshot_date] )
+    MEASURE '_Measure'[_t Qualifying Rows] =
+        VAR d = MAX ( fact_portfolio_snapshot[snapshot_date] )
+        RETURN
+            CALCULATE ( COUNTROWS ( fact_portfolio_snapshot ),
+                TREATAS ( { d }, dim_date[Date] ),
+                KEEPFILTERS ( fact_portfolio_snapshot[is_return_suspect] = 0 ) )
+    -- Independent cross-check: filters the fact directly, no TREATAS
+    MEASURE '_Measure'[_t Check] =
+        VAR d = MAX ( fact_portfolio_snapshot[snapshot_date] )
+        VAR q =
+            FILTER ( fact_portfolio_snapshot,
+                fact_portfolio_snapshot[snapshot_date] = d
+                    && fact_portfolio_snapshot[is_return_suspect] = 0 )
+        RETURN
+            DIVIDE ( SUMX ( q, fact_portfolio_snapshot[aum] * fact_portfolio_snapshot[active_alpha_ytd] ),
+                     SUMX ( q, fact_portfolio_snapshot[aum] ) )
+
+-- 1) Grand total (card)
+EVALUATE
+ROW (
+    "Last snapshot", [_t Last Snapshot],
+    "Qualifying rows", [_t Qualifying Rows],
+    "AUM-Weighted Alpha", [AUM-Weighted Alpha],
+    "Check", [_t Check]
+)
+
+-- 2) By year, with total row
+EVALUATE
+SUMMARIZECOLUMNS (
+    ROLLUPADDISSUBTOTAL ( dim_date[Year], "Is Total" ),
+    "Last snapshot", [_t Last Snapshot],
+    "Qualifying rows", [_t Qualifying Rows],
+    "AUM-Weighted Alpha", [AUM-Weighted Alpha],
+    "Check", [_t Check]
+)
+ORDER BY [Is Total], dim_date[Year]
+
+-- 3) By client tier, 2024, with total row
+EVALUATE
+SUMMARIZECOLUMNS (
+    ROLLUPADDISSUBTOTAL ( dim_client[client_tier], "Is Total" ),
+    TREATAS ( { 2024 }, dim_date[Year] ),
+    "Last snapshot", [_t Last Snapshot],
+    "Qualifying rows", [_t Qualifying Rows],
+    "AUM-Weighted Alpha", [AUM-Weighted Alpha],
+    "Check", [_t Check]
+)
+ORDER BY [Is Total], dim_client[client_tier]
+```
+
+**What to expect:**
+- `AUM-Weighted Alpha` and `Check` match on every row.
+- The total row in query 2 equals the result of query 1.
+- In query 2, each year's last snapshot is Dec 1 of that year.
+- The total row in query 3 equals the 2024 row in query 2.
+
+The `DEFINE MEASURE` only applies to this query, so nothing changes in the model until you use the "Update model" option.
+
+## 4. Assumptions
+
+- **Home table:** `_Measure` (it exists today); the planned rename carries the measure along.
+- **Which "last snapshot":** it's the last snapshot of any rows, not the last snapshot of non-suspect rows. If you want the latter, change the VAR to `CALCULATE ( MAX ( fact_portfolio_snapshot[snapshot_date] ), fact_portfolio_snapshot[is_return_suspect] = 0 )`.
+- **Who's included:** clients with a row on the last snapshot date. Clients who left earlier drop out, the same as `[Ending AUM]`.
+- **Units:** `active_alpha_ytd` is stored as a decimal (0.012 = 1.2%), hence the `0.00%` format. If it's in bps, change the format.
+- **Blank alpha:** I assumed no rows have `aum` but a blank `active_alpha_ytd`. Such rows would sit in the denominator as zeros and pull the result toward 0. If they exist, add `NOT ISBLANK ( fact_portfolio_snapshot[active_alpha_ytd] )` as another filter.
+- **Blank flag:** a blank `is_return_suspect` counts as 0 (qualifying), because in DAX `BLANK() = 0` is true. Use `== 0` if blanks should be excluded.
+- **Date table:** visuals use `dim_date[Year]` and `dim_date[Date]` (`dim_date[date]` in the relationships is the same column; DAX names aren't case-sensitive). The `LocalDateTable` hanging off `dim_date[date]` suggests Auto date/time is still on. Make sure visuals use `dim_date[Year]`, not the auto date hierarchy.
 ```
 
 ---
